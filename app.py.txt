@@ -1,0 +1,178 @@
+import streamlit as st
+import pandas as pd
+import requests
+import io
+import math
+import os
+import json
+from datetime import datetime
+import shutil
+
+# ==========================================
+# 1. CONFIGURARE
+# ==========================================
+st.set_page_config(page_title="Trading Journal & Calculator", page_icon="📈", layout="wide")
+
+H16_AVG = 0.3743
+
+LINKURI_PIETE = {
+    "GBPUSD": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQvx3dLFODeBqEEQ_nRHHY9AoQuMYpUT_JWlmoxaxPeqQV8a3Aiq3g-7xvye6q1gypHcYdIP1VNMULs/pub?gid=384557570&single=true&output=csv",
+    "DAX": "PUNE_LINKUL_CSV_PENTRU_DAX_AICI",
+    "UK100": "PUNE_LINKUL_CSV_PENTRU_UK100_AICI"
+}
+
+# Creăm folderul principal pentru Jurnal dacă nu există
+DIR_JURNAL = "Jurnal_Trades"
+if not os.path.exists(DIR_JURNAL):
+    os.makedirs(DIR_JURNAL)
+
+# ==========================================
+# 2. MOTORUL DE CĂUTARE ÎN TABEL
+# ==========================================
+@st.cache_data(ttl=60) # Păstrează datele descărcate 60 de secunde să se miște rapid
+def incarca_date(nume_piata):
+    url = LINKURI_PIETE.get(nume_piata.upper())
+    if not url or url == "": return None
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return pd.read_csv(io.StringIO(response.text), header=None)
+    except:
+        return None
+
+def cauta_procent(df, titlu_tabel, criteriu):
+    if criteriu == "-" or criteriu == "" or not criteriu:
+        return None
+    criteriu_curat = str(criteriu).strip().lower()
+    titlu_curat = str(titlu_tabel).strip().lower()
+    
+    for i in range(df.shape[0]):
+        for j in range(df.shape[1]):
+            if str(df.iloc[i, j]).strip().lower() == titlu_curat:
+                for rand_tabel in range(i + 1, min(i + 50, df.shape[0])):
+                    if str(df.iloc[rand_tabel, j]).strip().lower() == criteriu_curat:
+                        rand_curent = df.iloc[rand_tabel].values
+                        for k in range(j + 1, len(rand_curent)):
+                            try:
+                                f_val = float(rand_curent[k])
+                                if not math.isnan(f_val) and 0 <= f_val <= 1:
+                                    return f_val
+                            except: pass
+    return H16_AVG
+
+# ==========================================
+# 3. INTERFAȚA WEB (UI)
+# ==========================================
+st.title("📊 Trading Journal & Winrate Calculator")
+
+# --- SECȚIUNEA DE INPUT ---
+st.header("1. Parametrii Trade-ului")
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    piata = st.selectbox("Piața", ["GBPUSD", "DAX", "UK100"])
+    setup = st.selectbox("Setup", ["SLG", "1G", "2G", "2CG", "3G", "3CG"])
+    lichiditate_input = st.selectbox("Lichiditate", ["HoD/LoD+LIQ locala", "HoD/LoD+LIQ majora", "Locala", "Majora", "Maj+Loc", "2x Locala", "2x Majora", "HoD/LoD"])
+    nota_forma = st.selectbox("Nota / Forma", ["-", "Nota 10", "Nota 5", "1-2H"])
+
+with col2:
+    luna = st.selectbox("Luna", ["Ianuarie", "Februarie", "Martie", "Aprilie", "Mai", "Iunie", "Iulie", "August", "Septembrie", "Octombrie", "Noiembrie", "Decembrie"])
+    saptamana = st.selectbox("Săptămâna", ["W1", "W2", "W3", "W4", "W5"])
+    zi = st.selectbox("Ziua", ["Luni", "Marti", "Miercuri", "Joi", "Vineri"])
+    ora = st.selectbox("Ora", ["9:00-10:00", "10:00-11:00", "11:00-12:00", "12:00-13:00", "13:00-14:00", "14:00-15:00", "15:00-16:00", "16:00-17:00"])
+
+with col3:
+    time_window = st.selectbox("Time Window", ["0-30", "31-60", "61-90", "91-120"])
+    shift = st.selectbox("Shift", ["0-10", "10-20", "20-40", "40-60", "60-80", "80+"])
+    gap = st.selectbox("Gap", ["0-2", "2-4", "4-6", "6-8", "8-10", "10+"])
+
+# --- CALCULATORUL ---
+st.header("2. Analiză Statistică")
+if st.button("🧮 Calculează Șansele", type="primary"):
+    df = incarca_date(piata)
+    if df is None:
+        st.error("❌ Nu am putut descărca datele. Verifică link-ul CSV pentru această piață.")
+    else:
+        # Rutează lichiditatea
+        liq_cautare_baza = lichiditate_input
+        if "hod/lod+liq" in lichiditate_input.lower(): liq_cautare_baza = "hod/lod+liq"
+        elif "2x locala" in lichiditate_input.lower(): liq_cautare_baza = "2x locala"
+        
+        are_nota = "majora" not in lichiditate_input.lower() and "maj+loc" not in lichiditate_input.lower()
+
+        # Calcul Bază
+        wr_setup = cauta_procent(df, "SETUPS", setup)
+        wr_liq = cauta_procent(df, "Liquidities", liq_cautare_baza)
+        baza = (wr_setup * 0.35) + (wr_liq * 0.45)
+
+        # Calcul Context
+        detalii_context = []
+        if are_nota and nota_forma != "-":
+            nume_tabel_nota = "Locala Grades" if "locala" in liq_cautare_baza or "hod/lod+liq" in liq_cautare_baza else "HoD/Lod Form"
+            val_nota = cauta_procent(df, nume_tabel_nota, nota_forma)
+            if val_nota: detalii_context.append(val_nota)
+
+        for param, titlu in [(zi, "Days WR"), (zi, zi), (ora, "Hours"), (time_window, "Time Window 2"), 
+                             (shift, "Shift WR"), (gap, "Gap WR"), (saptamana, "Weeks WR"), (luna, "Months WR")]:
+            # La (zi, zi) e încrucișarea: df, titlu="Luni", criteriu=Lichiditatea(ex: Locala)
+            crit = liq_cautare_baza if titlu == zi else param
+            val = cauta_procent(df, titlu, crit)
+            if val is not None: detalii_context.append(val)
+
+        modificator = ((sum(detalii_context) / len(detalii_context)) - H16_AVG) * 0.20 if detalii_context else 0
+        scor_final = baza + modificator
+        winrate_real = scor_final / 0.80 
+        
+        # Salvăm rezultatul în sesiune ca să rămână pe ecran
+        st.session_state['rezultat'] = {
+            "baza": baza, "modificator": modificator, "winrate_real": winrate_real, "liq_baza": liq_cautare_baza
+        }
+
+if 'rezultat' in st.session_state:
+    r = st.session_state['rezultat']
+    st.success(f"🎯 **Șansă Reală de Win: {r['winrate_real']*100:.1f}%**")
+    st.info(f"🔹 **Bază:** {r['baza']/0.80*100:.1f}% | 🔹 **Context:** {'+' if r['modificator'] > 0 else ''}{r['modificator']/0.80*100:.2f}%")
+
+# --- SECȚIUNEA DE JURNAL ---
+st.header("3. Jurnalizare Trade")
+notițe = st.text_area("✍️ Side Notes (Observații despre piață, mindset, execuție):", height=100)
+poze_upload = st.file_uploader("📸 Încarcă Capturi de Ecran (Max 2 poze)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+
+if st.button("💾 Salvează Trade-ul în Jurnal", type="primary"):
+    if 'rezultat' not in st.session_state:
+        st.warning("Calculează mai întâi șansele înainte să salvezi!")
+    else:
+        # Creăm un ID unic bazat pe data și ora exactă
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        nume_folder_trade = f"Trade_{piata}_{timestamp}"
+        cale_trade = os.path.join(DIR_JURNAL, nume_folder_trade)
+        os.makedirs(cale_trade)
+        
+        # Salvăm datele text
+        date_salvare = {
+            "Data": timestamp, "Piata": piata, "Setup": setup, "Lichiditate": lichiditate_input,
+            "Nota_Forma": nota_forma, "Luna": luna, "Saptamana": saptamana, "Ziua": zi,
+            "Ora": ora, "Time_Window": time_window, "Shift": shift, "Gap": gap,
+            "Winrate_Calculat": f"{st.session_state['rezultat']['winrate_real']*100:.1f}%",
+            "Notite": notițe
+        }
+        with open(os.path.join(cale_trade, "date_trade.json"), "w", encoding="utf-8") as f:
+            json.dump(date_salvare, f, indent=4, ensure_ascii=False)
+            
+        # Salvăm pozele
+        if poze_upload:
+            for idx, fisier in enumerate(poze_upload[:2]): # Limităm la primele 2
+                cale_poza = os.path.join(cale_trade, f"poza_{idx+1}_{fisier.name}")
+                with open(cale_poza, "wb") as f:
+                    f.write(fisier.getbuffer())
+                    
+        st.success(f"✅ Trade-ul a fost salvat cu succes în folderul: {nume_folder_trade}")
+
+# --- DESCĂRCARE JURNAL COMPLET ---
+st.header("4. Export Istoric")
+st.write("Descarcă toată arhiva ta de trade-uri pentru analiză (inclusiv pozele și notițele).")
+
+if st.button("📦 Pregătește Arhiva ZIP cu tot Istoricul"):
+    shutil.make_archive("Jurnal_Export", 'zip', DIR_JURNAL)
+    with open("Jurnal_Export.zip", "rb") as f:
+        st.download_button("⬇️ Descarcă Arhiva ZIP", data=f, file_name=f"Jurnal_Trading_{datetime.now().strftime('%Y%m%d')}.zip", mime="application/zip")
